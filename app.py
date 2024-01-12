@@ -1,8 +1,9 @@
 from PyQt5.QtWidgets import QApplication, QMainWindow, QPushButton, QVBoxLayout, QWidget, QLabel
 from datetime import datetime
 import pandas as pd
-import math
 from requests_html import HTMLSession
+from utils import toSeconds, unknownToNull
+from tqdm import tqdm
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -219,115 +220,82 @@ def getGame(session, url, player_stats_id, export):
 
     return [team_df, player_df]
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 def getGames(start_year, end_year, last_year_start_week, last_year_end_week):
     session = HTMLSession()
-
     player_stats_id = 0
 
-    final_team_df = pd.DataFrame()
+    # Store data in lists instead of continuous concatenation
+    all_team_data = []
+    all_player_data = []
 
-    final_player_df = pd.DataFrame()
+    # Function to process each game
+    def process_game(game_url):
+        url = f'https://www.footballdb.com{game_url}'
+        game_stats = getGame(session, url, player_stats_id, False)
+        return game_stats
 
-    for year in range(start_year, end_year + 1):
+    # Loop through the years
+    for year in tqdm(range(start_year, end_year + 1), desc='Years'):
         res = session.get(f'https://www.footballdb.com/games/index.html?lg=NFL&yr={year}')
+        game_links = []
 
-        if year != end_year:
+        # Determine the range of weeks to process
+        week_range = res.html.find('.statistics')
+        if year == end_year:
+            week_range = week_range[last_year_start_week - 1:last_year_end_week]
 
-            for week in res.html.find('.statistics'):
+        # Collect game URLs
+        for week in week_range:
+            for game in week.find('tbody tr'):
+                game_link = game.find('a', first=True)
+                if game_link:
+                    game_url = str(game_link.links).replace("{'", '').replace("'}", '')
+                    game_links.append(game_url)
 
-                for game in week.find('tbody tr'):
+        # Parallel processing of games
+        with ThreadPoolExecutor() as executor:
+            future_to_url = {executor.submit(process_game, url): url for url in game_links}
+            for future in tqdm(as_completed(future_to_url), desc='Games', total=len(game_links), leave=False, position=1):
+                team_data, player_data = future.result()
+                all_team_data.append(team_data)
+                all_player_data.append(player_data)
 
-                    if game.find('a', first=True) == None:
-                        continue
-
-                    game_url = str(game.find('a', first=True).links)
-                    game_url = game_url.replace("{'", '')
-                    game_url = game_url.replace("'}", '')
-
-                    url = f'https://www.footballdb.com{game_url}'
-
-                    print(url)
-
-                    game_stats = getGame(session, url, player_stats_id, False)
-
-                    final_team_df = pd.concat([final_team_df, game_stats[0]])
-
-                    final_player_df = pd.concat([final_player_df, game_stats[1]])
-
-                    player_stats_id += 1
-
-        else:
-
-            for week in res.html.find('.statistics')[last_year_start_week - 1:last_year_end_week]:
-
-                for game in week.find('tbody tr'):
-
-                    if game.find('a', first=True) == None:
-                        continue
-
-                    game_url = str(game.find('a', first=True).links)
-                    game_url = game_url.replace("{'", '')
-                    game_url = game_url.replace("'}", '')
-
-                    url = f'https://www.footballdb.com{game_url}'
-
-                    print(url)
-
-                    game_stats = getGame(session, url, player_stats_id, False)
-
-                    final_team_df = pd.concat([final_team_df, game_stats[0]])
-
-                    final_player_df = pd.concat([final_player_df, game_stats[1]])
-
-                    player_stats_id += 1
+    # Concatenate all data frames outside the loop
+    final_team_df = pd.concat(all_team_data, ignore_index=True)
+    final_player_df = pd.concat(all_player_data, ignore_index=True)
 
     return [final_team_df, final_player_df]
 
+
 def getLastFinishedWeek(year):
     session = HTMLSession()
+    response = session.get(f'https://www.footballdb.com/games/index.html?lg=NFL&yr={year}')
 
-    res = session.get(f'https://www.footballdb.com/games/index.html?lg=NFL&yr={year}')
-
-    week_count = 0
-
-    for week in res.html.find('.statistics'):
-
-        no_game = False
-
-        for game in week.find('tbody tr'):
-
-            if game.find('a', first=True) == None:
-                no_game = True
-
-        if no_game == False:
-            week_count += 1
-
-        else:
-            break
+    for week_count, week in enumerate(response.html.find('.statistics'), start=1):
+        # If any game in the week does not have a link, it's an unplayed game
+        if any(game.find('a', first=True) is None for game in week.find('tbody tr')):
+            return week_count - 1
 
     return week_count
 
 def getNFLYear():
-    current_year = int(datetime.today().strftime('%Y'))
-
-    current_month = int(datetime.today().strftime('%m'))
-
-    if current_month < 6:
-        current_year -= 1
-
-    return current_year
+    today = datetime.today()
+    # If the current month is before June, subtract one year
+    return today.year - 1 if today.month < 6 else today.year
 
 def readScrapeInfo():
-    with open('info.txt', 'r') as f:
-        latest_scraped_year = int(f.readline().replace('latest_scraped_year = ', '').rstrip())
-
-        latest_scraped_week = int(f.readline().replace('latest_scraped_week = ', '').rstrip())
-
-        return [latest_scraped_year, latest_scraped_week]
+    with open('info.txt', 'r') as file:
+        lines = file.readlines()
+        latest_scraped_year = int(lines[0].split('=')[1].strip())
+        latest_scraped_week = int(lines[1].split('=')[1].strip())
+        return latest_scraped_year, latest_scraped_week
 
 def writeScrapeInfo(current_year, last_finished_week):
-    with open('info.txt', 'w') as f:
-        f.writelines('\n'.join([f'latest_scraped_year = {current_year}', f'latest_scraped_week = {last_finished_week}']))
+    with open('info.txt', 'w') as file:
+        file.write(f'latest_scraped_year = {current_year}\n')
+        file.write(f'latest_scraped_week = {last_finished_week}\n')
 
 #############################################################################
 
@@ -354,6 +322,7 @@ def getMostRecentGames():
 
     player_df.to_csv('player_stats_new.csv', header=False)
 
+
 def getAllGames():
     current_year = getNFLYear()
 
@@ -379,62 +348,37 @@ def getTeams():
 
     return team_names
 
-def makeOneDash(dash_stat):
-    return dash_stat.replace('--', '-')
-
-def toSeconds(min_sec):
-    if not isinstance(min_sec, str) and math.isnan(min_sec):
-        return None
-
-    min_sec_arr = min_sec.split(':')
-
-    return (int(min_sec_arr[0]) * 60) + int(min_sec_arr[1])
-
 def colOneDash(df):
-    extra_dash_cols = ['away_punt_returns', 'home_punt_returns', 'away_kickoff_returns', 'home_kickoff_returns', 'away_interception_returns', 'home_interception_returns']
+    columns_with_dashes = [
+        'away_punt_returns', 'home_punt_returns', 'away_kickoff_returns', 
+        'home_kickoff_returns', 'away_interception_returns', 'home_interception_returns'
+    ]
 
-    for col in extra_dash_cols:
-
-        df[col] = df[col].apply(makeOneDash)
-
+    df[columns_with_dashes] = df[columns_with_dashes].replace('--', '-', regex=True)
     return df
 
-def nullToZero(x):
-    if isinstance(x, str):
-
-        if x == '':
-            return 0
-
-        x = float(x)
-
-    if math.isnan(x):
-        return 0
-
-    else: 
-        return x
 
 def colNullToZero(df):
-    possible_null_cols = ['away_had_blocked', 'home_had_blocked', 'away_int_returns', 'home_int_returns', 'away_int_returns_yds', 'home_int_returns_yds', 'away_punts', 'home_punts', 'away_punts_avg', 'home_punts_avg', 'away_fg_made', 'home_fg_made', 'away_fg_att', 'home_fg_att']
+    columns_with_possible_nulls = [
+        'away_had_blocked', 'home_had_blocked', 'away_int_returns', 'home_int_returns', 
+        'away_int_returns_yds', 'home_int_returns_yds', 'away_punts', 'home_punts', 
+        'away_punts_avg', 'home_punts_avg', 'away_fg_made', 'home_fg_made', 
+        'away_fg_att', 'home_fg_att'
+    ]
 
-    for col in possible_null_cols:
-
-        df[col] = df[col].apply(nullToZero)
-
+    df[columns_with_possible_nulls] = df[columns_with_possible_nulls].apply(pd.to_numeric, errors='coerce').fillna(0)
     return df
 
-def percentToDecimal(x):
-    if isinstance(x, float):
-        return None
-
-    return float(x.strip('%')) / 100
 
 def colPercentToDecimal(df):
-    percent_cols = ['away_fourth_downs_percent', 'home_fourth_downs_percent', 'away_third_downs_percent', 'home_third_downs_percent']
+    percent_columns = [
+        'away_fourth_downs_percent', 'home_fourth_downs_percent', 
+        'away_third_downs_percent', 'home_third_downs_percent'
+    ]
 
-    for col in percent_cols:
-        df[col] = df[col].apply(percentToDecimal)
-
+    df[percent_columns] = df[percent_columns].replace('%', '', regex=True).astype(float) / 100
     return df
+
 
 def seperateTeamStats(df):
     seperate_teams = {}
@@ -501,12 +445,6 @@ def getWinStreak(index, team, year, seperate_team_stats):
 
     return streak
 
-def unknownToNull(x):
-    if x == 'unknown':
-        return None
-
-    else:
-        return x
 
 #############################################################################
 
