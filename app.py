@@ -6,10 +6,11 @@ from PyQt5.QtWidgets import (
     QWidget,
     QLabel,
 )
-import transformers
+from transformers import Transformer
 from game_getter import GameGetter
 
 game_getter = GameGetter()
+transformer = Transformer()
 
 
 class MainWindow(QMainWindow):
@@ -28,13 +29,13 @@ class MainWindow(QMainWindow):
         self.add_button(
             layout,
             "Perform All Transformations",
-            transformers.perform_all_transformations,
+            transformer.perform_all_transformations,
         )
-        self.add_button(layout, "Expand Team Stats", transformers.expand_team_stats)
-        self.add_button(layout, "Split Team Stats", transformers.split_team_stats)
-        self.add_button(layout, "Stagger Team Stats", transformers.stagger_team_stats)
+        self.add_button(layout, "Expand Team Stats", transformer.expand_team_stats)
+        self.add_button(layout, "Split Team Stats", transformer.split_team_stats)
+        self.add_button(layout, "Stagger Team Stats", transformer.stagger_team_stats)
         self.add_button(
-            layout, "Preprocess Team Stats", transformers.preprocess_team_stats
+            layout, "Preprocess Team Stats", transformer.preprocess_team_stats
         )
 
         # Add a separator label
