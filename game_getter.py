@@ -42,7 +42,7 @@ class GameGetter:
         self.last_played_week = self.get_last_played_week()
 
     @property
-    def current_season() -> int:
+    def current_season(self) -> int:
         today = datetime.today()
         # If the current month is before June, subtract one year
         return today.year - 1 if today.month < 6 else today.year
@@ -128,19 +128,31 @@ class GameGetter:
         score_line = res.html.find(".statistics", first=True).text.split("\n")
 
         is_overtime = score_line[4] == "5"
-        team_stats_obj["overtime"] = "true" if is_overtime else "false"
+        team_stats_obj["overtime"] = is_overtime
 
-        score_offset = 7 if is_overtime else 6
-        team_stats_obj["away_score"] = score_line[score_offset + 5]
-        team_stats_obj["home_score"] = score_line[score_offset + 5 + 7]
+        if is_overtime:
+            team_stats_obj['away_score'] = score_line[12]
+            team_stats_obj['home_score'] = score_line[19]
 
-        for i in range(1, 6):
-            team_stats_obj[f"away_score_q{i}"] = (
-                score_line[score_offset + i - 1] if i <= 4 or is_overtime else "0"
-            )
-            team_stats_obj[f"home_score_q{i}"] = (
-                score_line[score_offset + i + 6 - 1] if i <= 4 or is_overtime else "0"
-            )
+            for i in range(5):
+                team_stats_obj[f'away_score_q{i + 1}'] = score_line[7 + i]
+
+            for i in range(5):
+                team_stats_obj[f'home_score_q{i + 1}'] = score_line[14 + i]
+
+        else:
+            team_stats_obj['away_score'] = score_line[10]
+            team_stats_obj['home_score'] = score_line[16]
+
+            for i in range(4):
+                team_stats_obj[f'away_score_q{i + 1}'] = score_line[6 + i]
+
+            # team_stats_obj['away_score_q5'] = '0'
+                
+            for i in range(5):
+                team_stats_obj[f'home_score_q{i + 1}'] = score_line[12 + i]
+
+            # team_stats_obj['home_score_q5'] = '0'
 
         team_stats_sections = res.html.find("#divBox_team", first=True).find("tbody")
 
@@ -165,7 +177,8 @@ class GameGetter:
         res = session.get(url)
 
         team_stats = self.get_team_stats(res)
-        player_stats = self.get_player_stats(res, team_stats)
+        # player_stats = self.get_player_stats(res, team_stats)
+        player_stats = {}
 
         team_df = pd.DataFrame.from_dict([team_stats])
         player_df = pd.DataFrame.from_dict(player_stats, orient="index")
@@ -174,8 +187,8 @@ class GameGetter:
 
     def process_game(self, game_url: str) -> tuple[pd.DataFrame]:
         url = f"https://www.footballdb.com{game_url}"
-        return self.get_game(self.session, url, False)
-
+        return self.get_game(self.session, url)
+    
     def get_games(
         self, start_year: int, last_year_start_week: int
     ) -> tuple[pd.DataFrame]:
@@ -184,7 +197,7 @@ class GameGetter:
         all_player_data = []
 
         # Loop through the years
-        for year in tqdm(range(start_year, self.current_season + 1), desc="Years"):
+        for year in tqdm(range(start_year, self.current_season + 1), desc="Years", position=0):
             res = self.query_game_url()
             game_links = []
 
@@ -202,7 +215,6 @@ class GameGetter:
                         game_url = (
                             str(game_link.links).replace("{'", "").replace("'}", "")
                         )
-                        print("game_url: ", game_url)
                         game_links.append(game_url)
 
             # Parallel processing of games

@@ -152,8 +152,7 @@ def col_percent_to_decimal(df: pd.DataFrame) -> pd.DataFrame:
 
 class Transformer:
     def __init__(self, filename="team_stats.csv"):
-        self.df = pd.read_csv(filename).reset_index()
-        print(self.df)
+        self.filename = filename
         self.teams = get_teams()
 
         self.session = Session()
@@ -299,6 +298,7 @@ class Transformer:
         self.df = split_df
 
     def stagger_team_stats(self):
+        return
         separate_team_stats = self.separate_team_stats()
         separate_teams_list = []
 
@@ -344,6 +344,7 @@ class Transformer:
 
     def preprocess_team_stats(self):
         self.df["date"] = pd.to_datetime(self.df["date"])
+        return
         ref_date = pd.to_datetime("1978-01-01")
         self.df["recency"] = (self.df["date"] - ref_date).dt.days
         self.df["prev_overtime"] = self.df["prev_overtime"].astype(int)
@@ -363,6 +364,7 @@ class Transformer:
         )
 
     def perform_all_transformations(self):
+        self.df = pd.read_csv(self.filename).reset_index()
         self.seed_database()
 
         self.expand_team_stats()
