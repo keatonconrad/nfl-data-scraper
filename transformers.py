@@ -1,6 +1,9 @@
 from datetime import datetime
 import pandas as pd
 from utils import to_seconds, unknown_to_null
+from game_getter import GameType
+from models import Team, Stadium, TeamStat, Game, Session
+import sqlalchemy
 
 expanded_cols = {
     "away_att-comp-int": ["away_pass_att", "away_pass_comp", "away_pass_int"],
@@ -76,6 +79,51 @@ percent_columns = [
     "home_third_downs_percent",
 ]
 
+# For saving in the database
+column_name_mapping = {
+    "score": "score",
+    "score_q1": "score_q1",
+    "score_q2": "score_q2",
+    "score_q3": "score_q3",
+    "score_q4": "score_q4",
+    "score_q5": "score_overtime",
+    "first_downs": "first_downs",
+    "first_downs_rushing": "first_downs_rush",
+    "first_downs_passing": "first_downs_pass",
+    "first_downs_penalty": "first_downs_penalty",
+    "total_net_yards": "total_net_yards",
+    "net_yards_rushing": "rush_net_yards",
+    "rushing_plays": "rush_plays",
+    "rush_avg": "rush_avg_gain",
+    "net_yards_passing": "pass_net_yards",
+    "gross_yards_passing": "pass_gross_yards",
+    "pass_att": "pass_attempts",
+    "pass_comp": "pass_completions",
+    "pass_int": "pass_interceptions",
+    "sacked": "pass_sacked",
+    "sacked_yds_lost": "pass_sacked_yards_lost",
+    "punts": "punts",
+    "punts_avg": "punts_avg",
+    "punt_returns_count": "punt_returns",
+    "punt_returns_yds": "punt_return_yards",
+    "kickoff_returns_count": "kickoff_returns",
+    "kickoff_returns_yds": "kickoff_return_yards",
+    "int_returns": "interception_returns",
+    "int_returns_yds": "interception_return_yards",
+    "penalties": "penalties",
+    "penalties_yds": "penalty_yards",
+    "fumbles": "fumbles",
+    "fumbles_lost": "fumbles_lost",
+    "fg_made": "field_goals_made",
+    "fg_att": "field_goals_attempted",
+    "third_downs_made": "third_down_conversions",
+    "third_downs_att": "third_down_attempts",
+    "third_downs_percent": "third_down_rate",
+    "fourth_downs_made": "fourth_down_conversions",
+    "fourth_downs_att": "fourth_down_attempts",
+    "fourth_downs_percent": "fourth_down_rate",
+}
+
 
 def get_teams():
     team_names_df = pd.read_csv("historical-nfl-team-names.csv")
@@ -83,6 +131,7 @@ def get_teams():
 
 
 def col_one_dash(df: pd.DataFrame) -> pd.DataFrame:
+    print(df.columns)
     df[columns_with_dashes] = df[columns_with_dashes].replace("--", "-", regex=True)
     return df
 
@@ -104,7 +153,12 @@ def col_percent_to_decimal(df: pd.DataFrame) -> pd.DataFrame:
 class Transformer:
     def __init__(self, filename="team_stats.csv"):
         self.df = pd.read_csv(filename).reset_index()
+        print(self.df)
         self.teams = get_teams()
+
+        self.session = Session()
+        self.all_teams = self.session.query(Team).all()
+        self.all_stadiums = self.session.query(Stadium).all()
 
     def separate_team_stats(self):
         separate_teams = {team: {} for team in self.teams}
@@ -309,7 +363,85 @@ class Transformer:
         )
 
     def perform_all_transformations(self):
+        self.seed_database()
+
         self.expand_team_stats()
         self.split_team_stats()
         self.stagger_team_stats()
         self.preprocess_team_stats()
+
+        self.save_df_to_database()
+
+    def seed_database(self):
+        team_stadium = self.df.iloc[:, [4, 7]]
+        team_stadium.columns = ['team', 'stadium']
+        opponent_stadium = self.df.iloc[:, [5, 7]]
+        opponent_stadium.columns = ['team', 'stadium']
+        teams = pd.concat([team_stadium, opponent_stadium]).drop_duplicates()
+
+        for _, row in teams.iterrows():
+            stadium_exists = self.get_stadium_by_name(row["stadium"]) is not None
+            if not stadium_exists:
+                stadium = Stadium(name=row["stadium"])
+                self.session.add(stadium)
+                
+            team_exists = self.get_team_by_name(row["team"]) is not None
+            if not team_exists:
+                team = Team(name=self.teams[row["team"]], stadium=stadium)
+                self.session.add(team)
+        try:
+            self.session.commit()
+        except sqlalchemy.exc.IntegrityError:
+            self.session.rollback()
+            print("Error: IntegrityError")
+            return
+
+    def get_team_by_name(self, name):
+        return next((team for team in self.all_teams if team.name == self.teams[name]), None)
+
+    def get_stadium_by_name(self, name):
+        return next(
+            (stadium for stadium in self.all_stadiums if stadium.name == name),
+            None,
+        )
+
+    def save_df_to_database(self):
+        for _, row in self.df.iterrows():
+            home_team_str = row["team"] if row["home_or_away"] == 1 else row["opponent"]
+            away_team_str = row["team"] if row["home_or_away"] == 0 else row["opponent"]
+            home_team = self.get_team_by_name(home_team_str)
+            away_team = self.get_team_by_name(away_team_str)
+            home_prefix = "team_" if row["home_or_away"] == 1 else "opp_"
+            away_prefix = "opp_" if row["home_or_away"] == 1 else "team_"
+
+            # Create dictionary of stats for the home team
+            home_team_stat_dict = {
+                self.column_name_mapping[col]: row[home_prefix + col]
+                for col in self.column_name_mapping.keys()
+                if home_prefix + col in row
+            }
+            home_team_stat_dict["team_id"] = home_team.id
+            home_team_stat = TeamStat(**home_team_stat_dict)
+
+            # Create dictionary of stats for the away team
+            away_team_stat_dict = {
+                self.column_name_mapping[col]: row[away_prefix + col]
+                for col in self.column_name_mapping.keys()
+                if away_prefix + col in row
+            }
+            away_team_stat_dict["team_id"] = away_team.id
+            away_team_stat = TeamStat(**away_team_stat_dict)
+
+            game = Game(
+                date=row["date"],
+                home_team_id=home_team.id,
+                away_team_id=away_team.id,
+                attendance=row["attendance"],
+                overtime=row["overtime"],
+                game_type=GameType(int(row["game_type"])),
+                home_team_stats=home_team_stat,
+                away_team_stats=away_team_stat,
+                stadium_id=self.get_stadium_by_name(row["stadium"]).id,
+            )
+            self.session.add_all([home_team_stat, away_team_stat, game])
+        self.session.commit()
