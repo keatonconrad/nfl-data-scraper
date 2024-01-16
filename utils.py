@@ -1,9 +1,16 @@
 import math
 import pandas as pd
+import re
 
 
-def unknown_to_null(x: str):
-    return None if x == "unknown" else x
+def dms_to_decimal(dms_coord):
+    degrees, minutes, seconds, direction = re.match(
+        r"(\d+)°(\d+)′(\d+)″(\w)", dms_coord
+    ).groups()
+    decimal = float(degrees) + float(minutes) / 60 + float(seconds) / 3600
+    if direction in ["S", "W"]:
+        decimal = -decimal
+    return decimal
 
 
 def to_seconds(min_sec: str):

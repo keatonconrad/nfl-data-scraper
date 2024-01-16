@@ -14,14 +14,27 @@ from constants import (
     stat_section_mapping,
 )
 from utils import to_seconds
-from models import TeamStat, Game, Session, Team, Stadium
+from models import TeamStat, Game, Session, Team, Stadium, Weather
 from dateutil.parser import parse
 import re
+from pyowm import OWM
+import os
+from dotenv import load_dotenv
+import threading
+
+load_dotenv()
 
 
 def get_teams():
     team_names_df = pd.read_csv("historical-nfl-team-names.csv")
     return {team["Team"]: team["CurrentTeam"] for _, team in team_names_df.iterrows()}
+
+def parse_capacity(text: str):
+    numbers = re.findall(r'[\d,]+', text)
+    
+    if numbers:
+        return int(numbers[0].replace(',', ''))
+    return None
 
 
 class GameGetter:
@@ -31,8 +44,20 @@ class GameGetter:
         self.session = Session()
         self.current_season = self.datetime_to_nfl_season(datetime.today())
         self.last_played_week = self.get_last_played_week()
-        self.all_teams = self.session.query(Team).all()
-        self.all_stadiums = self.session.query(Stadium).all()
+        self.all_teams = set([t for t in self.session.query(Team).all()])
+        self.all_stadiums = set([t for t in self.session.query(Stadium).all()])
+
+        self.owm = OWM(os.environ.get("OWM_API_KEY")).weather_manager()
+        self.team_lock = threading.Lock()
+        self.stadium_lock = threading.Lock()
+
+    def get_weather(self, stadium: Stadium, date: datetime) -> Weather:
+        observation = self.owm.historical_weather_at_coords(
+            lat=stadium.latitude, lon=stadium.longitude
+        )
+        weather_obj = Weather(observation.weather)
+        self.session.add(weather_obj)
+        return weather_obj
 
     def datetime_to_nfl_season(self, date: datetime) -> int:
         # If the month is before June, subtract one year
@@ -83,16 +108,87 @@ class GameGetter:
 
         return player_stats_obj
 
-    def get_team_by_name(self, name: str) -> Team:
-        return next(
-            (team for team in self.all_teams if team.name == self.teams[name]), None
+    def get_stadium_info(self, stadium: Stadium) -> None:
+        stadium_name = (
+            "Highmark_Stadium_(New_York)"
+            if "Highmark Stadium" in stadium.name
+            else stadium.name
         )
+        url = f"https://en.wikipedia.org/wiki/{stadium_name.replace(' ', '_')}".split(
+            ","
+        )[0]
 
-    def get_stadium_by_name(self, name: str) -> Stadium:
-        return next(
-            (stadium for stadium in self.all_stadiums if stadium.name == name),
-            None,
-        )
+        response = self.html_session.get(url)
+        response.raise_for_status()
+        infobox = response.html.find(".infobox", first=True)
+
+        for row in infobox.find("tr"):
+            header = row.find("th", first=True)
+            if header:
+                header_text = header.text.strip()
+
+                # Check for city and state
+                if header_text in ["Location", "City"]:
+                    location = row.find("td", first=True).text.strip()
+                    location_parts = location.split(", ")
+                    if len(location_parts) >= 2:
+                        stadium.city = location_parts[0]
+                        stadium.state = location_parts[-1].split("\n")[
+                            0
+                        ]  # State is usually after the last comma
+
+                # Check for elevation
+                if header_text == "Elevation":
+                    stadium.elevation = parse_capacity(
+                        row.find("td", first=True).text.strip().split("\n")[0]
+                    )  # First line usually contains the elevation
+
+                # Check for capacity
+                if header_text == "Capacity":
+                    stadium.capacity = parse_capacity(
+                        row.find("td", first=True).text.strip().split("\n")[0]
+                    )  # First line usually contains the capacity
+
+                lat_element = infobox.find(".latitude", first=True)
+                if lat_element:
+                    stadium.latitude = lat_element.text
+
+                lon_element = infobox.find(".longitude", first=True)
+                if lon_element:
+                    stadium.longitude = lon_element.text
+
+    def get_or_create_team_by_name(self, name: str) -> Team:
+        with self.team_lock:
+            team = next(
+                (team for team in self.all_teams if team.name in [self.teams[name], name]),
+                None,
+            )
+            if team is None:
+                team = Team(name=self.teams[name])
+                self.session.add(team)
+                # self.session.commit()
+                self.all_teams.add(team)
+
+        return team
+
+    def get_or_create_stadium_by_name(self, name: str) -> Stadium:
+        with self.stadium_lock:
+            stadium = next(
+                (
+                    stadium
+                    for stadium in self.all_stadiums
+                    if stadium.name.lower() == name.split(",")[0].strip().lower()
+                ),
+                None,
+            )
+            if stadium is None:
+                stadium = Stadium(name=name.split(",")[0].strip())
+                self.get_stadium_info(stadium)
+                self.session.add(stadium)
+                # self.session.commit()
+                self.all_stadiums.add(stadium)
+
+        return stadium
 
     def process_stat_value(self, value: str, stat_name: str):
         if stat_name in columns_with_dashes:
@@ -128,12 +224,12 @@ class GameGetter:
                 setattr(
                     away_team_stats,
                     column_name_mapping[expanded_stat_name],
-                    processed_away_value,
+                    processed_away_value or 0
                 )
                 setattr(
                     home_team_stats,
                     column_name_mapping[expanded_stat_name],
-                    processed_home_value,
+                    processed_home_value or 0
                 )
         else:
             processed_away_value = self.process_stat_value(away_value, stat_name)
@@ -149,6 +245,7 @@ class GameGetter:
         game = Game()
         away_team_stats = TeamStat()
         home_team_stats = TeamStat()
+        self.session.add_all([game, away_team_stats, home_team_stats])
         game.away_team_stats = away_team_stats
         game.home_team_stats = home_team_stats
 
@@ -170,13 +267,20 @@ class GameGetter:
 
         team_names = game_info[0 + playoff_add]
 
-        game.away_team = self.get_team_by_name(team_names[: team_names.index(" vs ")])
-        game.home_team = self.get_team_by_name(
+        game.away_team = self.get_or_create_team_by_name(
+            team_names[: team_names.index(" vs ")]
+        )
+        game.away_team_stats.team_id = game.away_team.id
+        game.home_team = self.get_or_create_team_by_name(
             team_names[(team_names.index(" vs ") + 4) :]
         )
+        game.home_team_stats.team_id = game.home_team.id
 
         game.date = parse(game_info[1 + playoff_add])
-        game.stadium = self.get_stadium_by_name(game_info[2 + playoff_add])
+        stadium = self.get_or_create_stadium_by_name(game_info[2 + playoff_add])
+        game.stadium = stadium
+        if game.home_team.stadium is None:
+            game.home_team.stadium = stadium
 
         attendance_index = next(
             (i for i, info in enumerate(game_info) if "Attendance" in info), -1
@@ -229,12 +333,19 @@ class GameGetter:
                     home_team_stats,
                 )
 
+        self.session.add_all([game, away_team_stats, home_team_stats, stadium])
+        """
+        weather = self.get_weather(stadium, game.date)
+        
+        self.session.add(weather)
+        game.weather = weather
+        """
+
         return game, away_team_stats, home_team_stats
 
     def get_game(self, url: str) -> None:
         res = self.html_session.get(url)
-        game_stats = self.get_team_stats(res)
-        self.session.add_all(game_stats)
+        self.get_team_stats(res)
 
     def get_games(self, start_year: int, last_year_start_week: int) -> None:
         for year in tqdm(
@@ -258,14 +369,14 @@ class GameGetter:
                             str(game_link.links).replace("{'", "").replace("'}", "")
                         )
                         game_links.append(game_url)
-
+                        
             # Parallel processing of games
             with ThreadPoolExecutor() as executor:
                 future_to_url = {
                     executor.submit(
                         self.get_game, f"https://www.footballdb.com{url}"
                     ): url
-                    for url in game_links[:3]
+                    for url in game_links
                 }
                 for future in tqdm(
                     as_completed(future_to_url),
@@ -283,9 +394,11 @@ class GameGetter:
                 return
 
     def query_game_url(self):
-        return self.html_session.get(
+        response = self.html_session.get(
             f"https://www.footballdb.com/games/index.html?lg=NFL&yr={self.current_season}",
         )
+        response.raise_for_status()
+        return response
 
     def get_last_played_week(self) -> int:
         response = self.query_game_url()

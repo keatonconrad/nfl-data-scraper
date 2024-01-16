@@ -11,10 +11,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
-from game_getter import GameType
+from constants import GameType
 
 Base = declarative_base()
-engine = create_engine("sqlite:///nfl.db")
+engine = create_engine("postgresql://postgres:postgres@10.0.0.10:5432/nfl-data")
 
 
 class Stadium(Base):
@@ -25,8 +25,13 @@ class Stadium(Base):
     state = Column(String)
     capacity = Column(Integer)
     elevation = Column(Integer)  # in feet
+    latitude = Column(String)
+    longitude = Column(String)
     teams = relationship("Team", back_populates="stadium")
     games = relationship("Game", back_populates="stadium")
+    
+    def __repr__(self):
+        return f"<Stadium(name={self.name}, city={self.city}, state={self.state})>"
 
 
 class Team(Base):
@@ -35,20 +40,16 @@ class Team(Base):
     name = Column(String, unique=True)
     stadium_id = Column(Integer, ForeignKey("stadium.id"))
     stadium = relationship("Stadium", back_populates="teams")
-
-    home_games = relationship(
-        "Game", foreign_keys="[Game.home_team_id]", back_populates="home_team"
-    )
-    away_games = relationship(
-        "Game", foreign_keys="[Game.away_team_id]", back_populates="away_team"
-    )
+    
+    home_games = relationship("Game", foreign_keys="Game.home_team_id")
+    away_games = relationship("Game", foreign_keys="Game.away_team_id")
 
 
 class Game(Base):
     __tablename__ = "game"
     id = Column(Integer, primary_key=True)
     date = Column(DateTime)
-    week = Column(Integer) # Week of the season
+    week = Column(Integer)  # Week of the season
     home_team_id = Column(Integer, ForeignKey("team.id"))
     away_team_id = Column(Integer, ForeignKey("team.id"))
     attendance = Column(Integer)
@@ -57,6 +58,9 @@ class Game(Base):
     home_team_stats_id = Column(Integer, ForeignKey("team_stat.id"))
     away_team_stats_id = Column(Integer, ForeignKey("team_stat.id"))
     stadium_id = Column(Integer, ForeignKey("stadium.id"))
+    weather_id = Column(Integer, ForeignKey("weather.id"))
+    home_moneyline = Column(Integer)
+    away_moneyline = Column(Integer)
 
     home_team = relationship(
         "Team", foreign_keys=[home_team_id], back_populates="home_games"
@@ -71,6 +75,7 @@ class Game(Base):
         "TeamStat", foreign_keys=[away_team_stats_id], uselist=False
     )
     stadium = relationship("Stadium", foreign_keys=[stadium_id], back_populates="games")
+    weather = relationship("Weather", foreign_keys=[weather_id], uselist=False)
 
 
 class TeamStat(Base):
@@ -82,7 +87,6 @@ class TeamStat(Base):
 
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("team.id"))
-    team = relationship("Team")
     score = Column(Integer)
     score_q1 = Column(Integer)
     score_q2 = Column(Integer)
@@ -130,6 +134,25 @@ class TeamStat(Base):
     total_plays = Column(Integer)
     avg_gain = Column(Float)
     time_of_possession = Column(Integer)
+
+
+class Weather(Base):
+    __tablename__ = "weather"
+    id = Column(Integer, primary_key=True)
+    humidity = Column(Float)
+    wind_speed = Column(Float)
+    wind_deg = Column(Float)
+    wind_gust = Column(Float)
+    clouds = Column(Float)
+    rain = Column(Float)
+    snow = Column(Float)
+    precipitation = Column(Float)
+    weather_code = Column(Integer)
+    weather_main = Column(String)
+    pressure = Column(Float)
+    visibility = Column(Float)
+    temp_low = Column(Float)
+    temp_high = Column(Float)
 
 
 # set up sessionmaker
