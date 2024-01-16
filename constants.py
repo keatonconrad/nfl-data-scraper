@@ -1,77 +1,77 @@
 from enum import Enum
 
 expanded_cols = {
-    "away_att-comp-int": ["away_pass_att", "away_pass_comp", "away_pass_int"],
-    "home_att-comp-int": ["home_pass_att", "home_pass_comp", "home_pass_int"],
-    "away_sacked-yds_lost": ["away_sacked", "away_sacked_yds_lost"],
-    "home_sacked-yds_lost": ["home_sacked", "home_sacked_yds_lost"],
-    "away_punts-average": ["away_punts", "away_punts_avg"],
-    "home_punts-average": ["home_punts", "home_punts_avg"],
-    "away_punt_returns": ["away_punt_returns_count", "away_punt_returns_yds"],
-    "home_punt_returns": ["home_punt_returns_count", "home_punt_returns_yds"],
-    "away_kickoff_returns": ["away_kickoff_returns_count", "away_kickoff_returns_yds"],
-    "home_kickoff_returns": ["home_kickoff_returns_count", "home_kickoff_returns_yds"],
-    "away_interception_returns": ["away_int_returns", "away_int_returns_yds"],
-    "home_interception_returns": ["home_int_returns", "home_int_returns_yds"],
-    "away_penalties-yards": ["away_penalties", "away_penalties_yds"],
-    "home_penalties-yards": ["home_penalties", "home_penalties_yds"],
-    "away_fumbles-lost": ["away_fumbles", "away_fumbles_lost"],
-    "home_fumbles-lost": ["home_fumbles", "home_fumbles_lost"],
-    "away_field_goals": ["away_fg_made", "away_fg_att"],
-    "home_field_goals": ["home_fg_made", "home_fg_att"],
-    "away_third_downs": [
-        "away_third_downs_made",
-        "away_third_downs_att",
-        "away_third_downs_percent",
+    "att-comp-int": ["pass_att", "pass_comp", "pass_int"],
+    "att-comp-int": ["pass_att", "pass_comp", "pass_int"],
+    "sacked-yds_lost": ["sacked", "sacked_yds_lost"],
+    "sacked-yds_lost": ["sacked", "sacked_yds_lost"],
+    "punts-average": ["punts", "punts_avg"],
+    "punts-average": ["punts", "punts_avg"],
+    "punt_returns": ["punt_returns_count", "punt_returns_yds"],
+    "punt_returns": ["punt_returns_count", "punt_returns_yds"],
+    "kickoff_returns": ["kickoff_returns_count", "kickoff_returns_yds"],
+    "kickoff_returns": ["kickoff_returns_count", "kickoff_returns_yds"],
+    "interception_returns": ["int_returns", "int_returns_yds"],
+    "interception_returns": ["int_returns", "int_returns_yds"],
+    "penalties-yards": ["penalties", "penalties_yds"],
+    "penalties-yards": ["penalties", "penalties_yds"],
+    "fumbles-lost": ["fumbles", "fumbles_lost"],
+    "fumbles-lost": ["fumbles", "fumbles_lost"],
+    "field_goals": ["fg_made", "fg_att"],
+    "field_goals": ["fg_made", "fg_att"],
+    "third_downs": [
+        "third_downs_made",
+        "third_downs_att",
+        "third_downs_percent",
     ],
-    "home_third_downs": [
-        "home_third_downs_made",
-        "home_third_downs_att",
-        "home_third_downs_percent",
+    "third_downs": [
+        "third_downs_made",
+        "third_downs_att",
+        "third_downs_percent",
     ],
-    "away_fourth_downs": [
-        "away_fourth_downs_made",
-        "away_fourth_downs_att",
-        "away_fourth_downs_percent",
+    "fourth_downs": [
+        "fourth_downs_made",
+        "fourth_downs_att",
+        "fourth_downs_percent",
     ],
-    "home_fourth_downs": [
-        "home_fourth_downs_made",
-        "home_fourth_downs_att",
-        "home_fourth_downs_percent",
+    "fourth_downs": [
+        "fourth_downs_made",
+        "fourth_downs_att",
+        "fourth_downs_percent",
     ],
 }
 
 columns_with_dashes = [
-    "away_punt_returns",
-    "home_punt_returns",
-    "away_kickoff_returns",
-    "home_kickoff_returns",
-    "away_interception_returns",
-    "home_interception_returns",
+    "punt_returns",
+    "punt_returns",
+    "kickoff_returns",
+    "kickoff_returns",
+    "interception_returns",
+    "interception_returns",
 ]
 
 columns_with_possible_nulls = [
-    "away_had_blocked",
-    "home_had_blocked",
-    "away_int_returns",
-    "home_int_returns",
-    "away_int_returns_yds",
-    "home_int_returns_yds",
-    "away_punts",
-    "home_punts",
-    "away_punts_avg",
-    "home_punts_avg",
-    "away_fg_made",
-    "home_fg_made",
-    "away_fg_att",
-    "home_fg_att",
+    "had_blocked",
+    "had_blocked",
+    "int_returns",
+    "int_returns",
+    "int_returns_yds",
+    "int_returns_yds",
+    "punts",
+    "punts",
+    "punts_avg",
+    "punts_avg",
+    "fg_made",
+    "fg_made",
+    "fg_att",
+    "fg_att",
 ]
 
 percent_columns = [
-    "away_fourth_downs_percent",
-    "home_fourth_downs_percent",
-    "away_third_downs_percent",
-    "home_third_downs_percent",
+    "fourth_downs_percent",
+    "fourth_downs_percent",
+    "third_downs_percent",
+    "third_downs_percent",
 ]
 
 # For saving in the database
@@ -118,8 +118,10 @@ column_name_mapping = {
     "fourth_downs_made": "fourth_down_conversions",
     "fourth_downs_att": "fourth_down_attempts",
     "fourth_downs_percent": "fourth_down_rate",
+    "had_blocked": "had_blocked",
+    "time_of_possession": "time_of_possession",
+    "total_plays": "total_plays",
 }
-
 
 
 class GameType(Enum):

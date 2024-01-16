@@ -3,7 +3,6 @@ import pandas as pd
 from requests_html import HTMLSession
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
 from constants import (
     columns_with_dashes,
     columns_with_possible_nulls,
@@ -23,26 +22,6 @@ import re
 def get_teams():
     team_names_df = pd.read_csv("historical-nfl-team-names.csv")
     return {team["Team"]: team["CurrentTeam"] for _, team in team_names_df.iterrows()}
-
-
-def col_one_dash(df: pd.DataFrame) -> pd.DataFrame:
-    print(df.columns)
-    df[columns_with_dashes] = df[columns_with_dashes].replace("--", "-", regex=True)
-    return df
-
-
-def col_null_to_zero(df: pd.DataFrame) -> pd.DataFrame:
-    df[columns_with_possible_nulls] = (
-        df[columns_with_possible_nulls].apply(pd.to_numeric, errors="coerce").fillna(0)
-    )
-    return df
-
-
-def col_percent_to_decimal(df: pd.DataFrame) -> pd.DataFrame:
-    df[percent_columns] = (
-        df[percent_columns].replace("%", "", regex=True).astype(float) / 100
-    )
-    return df
 
 
 class GameGetter:
@@ -159,15 +138,12 @@ class GameGetter:
         else:
             processed_away_value = self.process_stat_value(away_value, stat_name)
             processed_home_value = self.process_stat_value(home_value, stat_name)
-            try:
-                setattr(
-                    away_team_stats, column_name_mapping[stat_name], processed_away_value
-                )
-                setattr(
-                    home_team_stats, column_name_mapping[stat_name], processed_home_value
-                )
-            except KeyError:
-                print(f"KeyError: {stat_name}")
+            setattr(
+                away_team_stats, column_name_mapping[stat_name], processed_away_value
+            )
+            setattr(
+                home_team_stats, column_name_mapping[stat_name], processed_home_value
+            )
 
     def get_team_stats(self, res: HTMLSession) -> dict:
         game = Game()
@@ -183,7 +159,7 @@ class GameGetter:
         game_info = res.html.find("center")[1].text.split("\n")
 
         playoff_add = 0
-        game.game_type = GameType.REGULAR_SEASON.value
+        game.game_type = GameType.REGULAR_SEASON
 
         if any(x in game_info[0] for x in ["AFC", "NFC", "Super Bowl"]):
             for key, value in label_to_game_type.items():
@@ -289,7 +265,7 @@ class GameGetter:
                     executor.submit(
                         self.get_game, f"https://www.footballdb.com{url}"
                     ): url
-                    for url in game_links
+                    for url in game_links[:3]
                 }
                 for future in tqdm(
                     as_completed(future_to_url),
@@ -299,7 +275,12 @@ class GameGetter:
                     position=1,
                 ):
                     future.result()
-            self.session.commit()
+            try:
+                self.session.commit()
+            except Exception as e:
+                print(e)
+                self.session.rollback()
+                return
 
     def query_game_url(self):
         return self.html_session.get(

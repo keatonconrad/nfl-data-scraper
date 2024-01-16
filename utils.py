@@ -14,12 +14,14 @@ def to_seconds(min_sec: str):
 
     return (int(min_sec_arr[0]) * 60) + int(min_sec_arr[1])
 
+
 def get_win_percentage(index: int, team: str, year: str, df: pd.DataFrame):
     if index == 0:
         return None
 
     wins = sum(game["outcome"] for game in df[team][year][:index])
     return wins / index
+
 
 def get_win_streak(index: int, team: str, year: str, df: pd.DataFrame):
     if index == 0:
