@@ -48,6 +48,7 @@ class Game(Base):
     __tablename__ = "game"
     id = Column(Integer, primary_key=True)
     date = Column(DateTime)
+    week = Column(Integer) # Week of the season
     home_team_id = Column(Integer, ForeignKey("team.id"))
     away_team_id = Column(Integer, ForeignKey("team.id"))
     attendance = Column(Integer)

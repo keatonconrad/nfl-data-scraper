@@ -6,11 +6,9 @@ from PyQt5.QtWidgets import (
     QWidget,
     QLabel,
 )
-from transformers import Transformer
 from game_getter import GameGetter
 
 game_getter = GameGetter()
-transformer = Transformer()
 
 
 class MainWindow(QMainWindow):
@@ -23,23 +21,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.central_widget)
 
         layout = QVBoxLayout()
-
-        # Add a label and buttons for Transform Options
-        layout.addWidget(QLabel("Transform Options"))
-        self.add_button(
-            layout,
-            "Perform All Transformations",
-            transformer.perform_all_transformations,
-        )
-        self.add_button(layout, "Expand Team Stats", transformer.expand_team_stats)
-        self.add_button(layout, "Split Team Stats", transformer.split_team_stats)
-        self.add_button(layout, "Stagger Team Stats", transformer.stagger_team_stats)
-        self.add_button(
-            layout, "Preprocess Team Stats", transformer.preprocess_team_stats
-        )
-
-        # Add a separator label
-        layout.addWidget(QLabel("------"))
 
         # Add a label and buttons for Scrape Options
         layout.addWidget(QLabel("Scrape Options"))

@@ -4,48 +4,60 @@ from requests_html import HTMLSession
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from enum import Enum
+from constants import (
+    columns_with_dashes,
+    columns_with_possible_nulls,
+    percent_columns,
+    expanded_cols,
+    column_name_mapping,
+    GameType,
+    label_to_game_type,
+    stat_section_mapping,
+)
+from utils import to_seconds
+from models import TeamStat, Game, Session, Team, Stadium
+from dateutil.parser import parse
+import re
 
 
-class GameType(Enum):
-    REGULAR_SEASON = 0
-    WILD_CARD = 1
-    DIVISIONAL = 2
-    CONFERENCE = 3
-    SUPER_BOWL = 4
+def get_teams():
+    team_names_df = pd.read_csv("historical-nfl-team-names.csv")
+    return {team["Team"]: team["CurrentTeam"] for _, team in team_names_df.iterrows()}
 
 
-label_to_game_type = {
-    "Regular Season": GameType.REGULAR_SEASON,
-    "Wild Card": GameType.WILD_CARD,
-    "Divisional": GameType.DIVISIONAL,
-    "Conference": GameType.CONFERENCE,
-    "Super Bowl": GameType.SUPER_BOWL,
-}
+def col_one_dash(df: pd.DataFrame) -> pd.DataFrame:
+    print(df.columns)
+    df[columns_with_dashes] = df[columns_with_dashes].replace("--", "-", regex=True)
+    return df
 
-stat_section_mapping = {
-    "Passing": "pass",
-    "Rushing": "rush",
-    "Receiving": "rec",
-    "Kickoff Returns": "kick_ret",
-    "Punt Returns": "punt_ret",
-    "Punting": "punt",
-    "Kicking": "kick",
-    "Kickoffs": "kickoff",
-    "Defense": "def",
-    "Fumbles": "fum",
-}
+
+def col_null_to_zero(df: pd.DataFrame) -> pd.DataFrame:
+    df[columns_with_possible_nulls] = (
+        df[columns_with_possible_nulls].apply(pd.to_numeric, errors="coerce").fillna(0)
+    )
+    return df
+
+
+def col_percent_to_decimal(df: pd.DataFrame) -> pd.DataFrame:
+    df[percent_columns] = (
+        df[percent_columns].replace("%", "", regex=True).astype(float) / 100
+    )
+    return df
 
 
 class GameGetter:
     def __init__(self):
-        self.session = HTMLSession()
+        self.html_session = HTMLSession()
+        self.teams = get_teams()
+        self.session = Session()
+        self.current_season = self.datetime_to_nfl_season(datetime.today())
         self.last_played_week = self.get_last_played_week()
+        self.all_teams = self.session.query(Team).all()
+        self.all_stadiums = self.session.query(Stadium).all()
 
-    @property
-    def current_season(self) -> int:
-        today = datetime.today()
-        # If the current month is before June, subtract one year
-        return today.year - 1 if today.month < 6 else today.year
+    def datetime_to_nfl_season(self, date: datetime) -> int:
+        # If the month is before June, subtract one year
+        return date.year - 1 if date.month < 6 else date.year
 
     def get_player_stats(self, res: HTMLSession, team_stats_obj: dict) -> list[dict]:
         player_stats_obj = {}
@@ -92,112 +104,166 @@ class GameGetter:
 
         return player_stats_obj
 
+    def get_team_by_name(self, name: str) -> Team:
+        return next(
+            (team for team in self.all_teams if team.name == self.teams[name]), None
+        )
+
+    def get_stadium_by_name(self, name: str) -> Stadium:
+        return next(
+            (stadium for stadium in self.all_stadiums if stadium.name == name),
+            None,
+        )
+
+    def process_stat_value(self, value: str, stat_name: str):
+        if stat_name in columns_with_dashes:
+            value = value.replace("--", "-")
+        if "time_of_possession" in stat_name:
+            return to_seconds(value)
+        if stat_name in percent_columns:
+            return float(value.replace("%", "")) / 100
+        if stat_name in columns_with_possible_nulls and value == "":
+            return 0
+        return value
+
+    def process_and_assign(
+        self,
+        stat_name: str,
+        away_value: str,
+        home_value: str,
+        away_team_stats: TeamStat,
+        home_team_stats: TeamStat,
+    ):
+        if stat_name in expanded_cols:
+            expanded_stat_names = expanded_cols[stat_name]
+            away_values = away_value.split("-")
+            home_values = home_value.split("-")
+
+            for i, expanded_stat_name in enumerate(expanded_stat_names):
+                processed_away_value = self.process_stat_value(
+                    away_values[i] if i < len(away_values) else "", expanded_stat_name
+                )
+                processed_home_value = self.process_stat_value(
+                    home_values[i] if i < len(home_values) else "", expanded_stat_name
+                )
+                setattr(
+                    away_team_stats,
+                    column_name_mapping[expanded_stat_name],
+                    processed_away_value,
+                )
+                setattr(
+                    home_team_stats,
+                    column_name_mapping[expanded_stat_name],
+                    processed_home_value,
+                )
+        else:
+            processed_away_value = self.process_stat_value(away_value, stat_name)
+            processed_home_value = self.process_stat_value(home_value, stat_name)
+            try:
+                setattr(
+                    away_team_stats, column_name_mapping[stat_name], processed_away_value
+                )
+                setattr(
+                    home_team_stats, column_name_mapping[stat_name], processed_home_value
+                )
+            except KeyError:
+                print(f"KeyError: {stat_name}")
+
     def get_team_stats(self, res: HTMLSession) -> dict:
-        team_stats_obj = {}
+        game = Game()
+        away_team_stats = TeamStat()
+        home_team_stats = TeamStat()
+        game.away_team_stats = away_team_stats
+        game.home_team_stats = home_team_stats
+
+        week_text = res.html.find(".divheader", first=True).text
+        week_match = re.search(r"Week (\d+)", week_text)
+        game.week = week_match.group(1) if week_match else None
 
         game_info = res.html.find("center")[1].text.split("\n")
 
         playoff_add = 0
-        team_stats_obj["postseason"] = GameType.REGULAR_SEASON.value
+        game.game_type = GameType.REGULAR_SEASON.value
 
         if any(x in game_info[0] for x in ["AFC", "NFC", "Super Bowl"]):
             for key, value in label_to_game_type.items():
                 if key in game_info[0]:
-                    team_stats_obj["postseason"] = value
+                    game.game_type = value
                     playoff_add = 1
                     break
 
         team_names = game_info[0 + playoff_add]
 
-        team_stats_obj["away_team"] = team_names[: team_names.index(" vs ")]
-        team_stats_obj["home_team"] = team_names[(team_names.index(" vs ") + 4) :]
+        game.away_team = self.get_team_by_name(team_names[: team_names.index(" vs ")])
+        game.home_team = self.get_team_by_name(
+            team_names[(team_names.index(" vs ") + 4) :]
+        )
 
-        team_stats_obj["date"] = game_info[1 + playoff_add]
-        team_stats_obj["stadium"] = game_info[2 + playoff_add]
+        game.date = parse(game_info[1 + playoff_add])
+        game.stadium = self.get_stadium_by_name(game_info[2 + playoff_add])
 
         attendance_index = next(
             (i for i, info in enumerate(game_info) if "Attendance" in info), -1
         )
         if attendance_index != -1:
-            team_stats_obj["attendance"] = game_info[attendance_index][12:].replace(
-                ",", ""
-            )
-        else:
-            team_stats_obj["attendance"] = "unknown"
+            game.attendance = game_info[attendance_index][12:].replace(",", "")
 
         score_line = res.html.find(".statistics", first=True).text.split("\n")
 
         is_overtime = score_line[4] == "5"
-        team_stats_obj["overtime"] = is_overtime
+        game.overtime = is_overtime
 
         if is_overtime:
-            team_stats_obj['away_score'] = score_line[12]
-            team_stats_obj['home_score'] = score_line[19]
+            away_team_stats.score = score_line[12]
+            home_team_stats.score = score_line[19]
 
             for i in range(5):
-                team_stats_obj[f'away_score_q{i + 1}'] = score_line[7 + i]
-
-            for i in range(5):
-                team_stats_obj[f'home_score_q{i + 1}'] = score_line[14 + i]
+                setattr(away_team_stats, f"score_q{i + 1}", score_line[7 + i])
+                setattr(home_team_stats, f"score_q{i + 1}", score_line[14 + i])
 
         else:
-            team_stats_obj['away_score'] = score_line[10]
-            team_stats_obj['home_score'] = score_line[16]
+            away_team_stats.score = score_line[10]
+            home_team_stats.score = score_line[16]
 
             for i in range(4):
-                team_stats_obj[f'away_score_q{i + 1}'] = score_line[6 + i]
-
-            # team_stats_obj['away_score_q5'] = '0'
-                
-            for i in range(5):
-                team_stats_obj[f'home_score_q{i + 1}'] = score_line[12 + i]
-
-            # team_stats_obj['home_score_q5'] = '0'
+                setattr(away_team_stats, f"score_q{i + 1}", score_line[6 + i])
+                setattr(home_team_stats, f"score_q{i + 1}", score_line[12 + i])
 
         team_stats_sections = res.html.find("#divBox_team", first=True).find("tbody")
 
         for section in team_stats_sections:
             for row in section.find("tr"):
                 stats = row.find("td")
-                stat_name = stats[0].text
-
                 stat_name = (
-                    stat_name.lower()
+                    stats[0]
+                    .text.lower()
                     .replace(" ", "_")
                     .replace("_-_", "-")
                     .replace(".", "")
                 )
 
-                team_stats_obj[f"away_{stat_name}"] = stats[1].text
-                team_stats_obj[f"home_{stat_name}"] = stats[2].text
+                stat_away_value = stats[1].text
+                stat_home_value = stats[2].text
 
-        return team_stats_obj
+                self.process_and_assign(
+                    stat_name,
+                    stat_away_value,
+                    stat_home_value,
+                    away_team_stats,
+                    home_team_stats,
+                )
 
-    def get_game(self, session: HTMLSession, url: str) -> tuple[pd.DataFrame]:
-        res = session.get(url)
+        return game, away_team_stats, home_team_stats
 
-        team_stats = self.get_team_stats(res)
-        # player_stats = self.get_player_stats(res, team_stats)
-        player_stats = {}
+    def get_game(self, url: str) -> None:
+        res = self.html_session.get(url)
+        game_stats = self.get_team_stats(res)
+        self.session.add_all(game_stats)
 
-        team_df = pd.DataFrame.from_dict([team_stats])
-        player_df = pd.DataFrame.from_dict(player_stats, orient="index")
-
-        return team_df, player_df
-
-    def process_game(self, game_url: str) -> tuple[pd.DataFrame]:
-        url = f"https://www.footballdb.com{game_url}"
-        return self.get_game(self.session, url)
-    
-    def get_games(
-        self, start_year: int, last_year_start_week: int
-    ) -> tuple[pd.DataFrame]:
-        # Store data in lists instead of continuous concatenation
-        all_team_data = []
-        all_player_data = []
-
-        # Loop through the years
-        for year in tqdm(range(start_year, self.current_season + 1), desc="Years", position=0):
+    def get_games(self, start_year: int, last_year_start_week: int) -> None:
+        for year in tqdm(
+            range(start_year, self.current_season + 1), desc="Years", position=0
+        ):
             res = self.query_game_url()
             game_links = []
 
@@ -220,7 +286,10 @@ class GameGetter:
             # Parallel processing of games
             with ThreadPoolExecutor() as executor:
                 future_to_url = {
-                    executor.submit(self.process_game, url): url for url in game_links
+                    executor.submit(
+                        self.get_game, f"https://www.footballdb.com{url}"
+                    ): url
+                    for url in game_links
                 }
                 for future in tqdm(
                     as_completed(future_to_url),
@@ -229,22 +298,15 @@ class GameGetter:
                     leave=False,
                     position=1,
                 ):
-                    team_data, player_data = future.result()
-                    all_team_data.append(team_data)
-                    all_player_data.append(player_data)
-
-        # Concatenate all data frames outside the loop
-        final_team_df = pd.concat(all_team_data, ignore_index=True)
-        final_player_df = pd.concat(all_player_data, ignore_index=True)
-
-        return [final_team_df, final_player_df]
+                    future.result()
+            self.session.commit()
 
     def query_game_url(self):
-        return self.session.get(
-            f"https://www.footballdb.com/games/index.html?lg=NFL&yr={self.current_season}"
+        return self.html_session.get(
+            f"https://www.footballdb.com/games/index.html?lg=NFL&yr={self.current_season}",
         )
 
-    def get_last_played_week(self):
+    def get_last_played_week(self) -> int:
         response = self.query_game_url()
 
         for week_count, week in enumerate(response.html.find(".statistics"), start=1):
@@ -256,40 +318,21 @@ class GameGetter:
 
         return week_count
 
-    def read_scrape_info() -> tuple[int, int]:
-        with open("info.txt", "r") as file:
-            lines = file.readlines()
-            latest_scraped_year = int(lines[0].split("=")[1].strip())
-            latest_scraped_week = int(lines[1].split("=")[1].strip())
-            return latest_scraped_year, latest_scraped_week
-
-    def write_scrape_info(self) -> None:
-        with open("info.txt", "w") as file:
-            file.write(f"latest_scraped_year = {self.current_season}\n")
-            file.write(f"latest_scraped_week = {self.last_finished_week}\n")
+    def get_last_scraped_season_and_week(self) -> tuple[int, int]:
+        most_recent_game = self.session.query(Game).order_by(Game.date.desc()).first()
+        return (
+            self.datetime_to_nfl_season(most_recent_game.date.year),
+            most_recent_game.week,
+        )
 
     #############################################################################
 
     def get_most_recent_games(self):
-        latest_scraped_year, latest_scraped_week = self.read_scrape_info()
-
-        recent_dfs = self.get_games(latest_scraped_year, latest_scraped_week + 1)
-
-        self.write_scrape_info()
-
-        team_df = pd.read_csv("team_stats.csv")
-        player_df = pd.read_csv("player_stats.csv")
-
-        team_df = pd.concat([team_df, recent_dfs[0]], ignore_index=True)
-        player_df = pd.concat([player_df, recent_dfs[1]], ignore_index=True)
-
-        team_df.to_csv("team_stats_new.csv", header=False)
-        player_df.to_csv("player_stats_new.csv", header=False)
+        (
+            latest_scraped_year,
+            latest_scraped_week,
+        ) = self.get_last_scraped_season_and_week()
+        self.get_games(latest_scraped_year, latest_scraped_week + 1)
 
     def get_all_games(self):
-        team_stats, player_stats = self.get_games(1978, 1)
-
-        team_stats.to_csv("team_stats.csv")
-        player_stats.to_csv("player_stats.csv")
-
-        self.write_scrape_info()
+        self.get_games(1978, 1)
