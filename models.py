@@ -7,14 +7,25 @@ from sqlalchemy import (
     Boolean,
     Enum,
     Float,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import relationship, sessionmaker
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import create_engine
-from constants import GameType
+from constants import GameType, team_to_abbr
+import re
+from requests_html import HTMLSession
 
 Base = declarative_base()
 engine = create_engine("postgresql://postgres:postgres@10.0.0.10:5432/nfl-data")
+
+
+def parse_numbers(text: str) -> int | None:
+    numbers = re.findall(r"[\d,]+", text)
+
+    if numbers:
+        return int(numbers[0].replace(",", ""))
+    return None
 
 
 class Stadium(Base):
@@ -29,9 +40,60 @@ class Stadium(Base):
     longitude = Column(String)
     teams = relationship("Team", back_populates="stadium")
     games = relationship("Game", back_populates="stadium")
-    
+
     def __repr__(self):
         return f"<Stadium(name={self.name}, city={self.city}, state={self.state})>"
+
+    def get_info(self, html_session: HTMLSession) -> None:
+        stadium_name = (
+            "Highmark_Stadium_(New_York)"
+            if "Highmark Stadium" in self.name
+            else self.name
+        )
+        url = f"https://en.wikipedia.org/wiki/{stadium_name.replace(' ', '_')}".split(
+            ","
+        )[0]
+
+        response = html_session.get(url)
+        response.raise_for_status()
+        infobox = response.html.find(".infobox", first=True)
+        if not infobox:
+            return
+
+        for row in infobox.find("tr"):
+            header = row.find("th", first=True)
+            if header:
+                header_text = header.text.strip()
+
+                # Check for city and state
+                if header_text in ["Location", "City"]:
+                    location = row.find("td", first=True).text.strip()
+                    location_parts = location.split(", ")
+                    if len(location_parts) >= 2:
+                        self.city = location_parts[0]
+                        self.state = location_parts[-1].split("\n")[
+                            0
+                        ]  # State is usually after the last comma
+
+                # Check for elevation
+                if header_text == "Elevation":
+                    self.elevation = parse_numbers(
+                        row.find("td", first=True).text.strip().split("\n")[0]
+                    )  # First line usually contains the elevation
+
+                # Check for capacity
+                if header_text == "Capacity":
+                    self.capacity = parse_numbers(
+                        row.find("td", first=True).text.strip().split("\n")[0]
+                    )  # First line usually contains the capacity
+
+                lat_element = infobox.find(".latitude", first=True)
+                if lat_element:
+                    self.latitude = lat_element.text
+
+                lon_element = infobox.find(".longitude", first=True)
+                if lon_element:
+                    self.longitude = lon_element.text
 
 
 class Team(Base):
@@ -39,8 +101,13 @@ class Team(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, unique=True)
     stadium_id = Column(Integer, ForeignKey("stadium.id"))
-    stadium = relationship("Stadium", back_populates="teams")
+    abbreviation = Column(String, unique=True)
     
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.abbreviation = team_to_abbr[name] if name in team_to_abbr else None
+
+    stadium = relationship("Stadium", back_populates="teams")
     home_games = relationship("Game", foreign_keys="Game.home_team_id")
     away_games = relationship("Game", foreign_keys="Game.away_team_id")
 
@@ -61,6 +128,11 @@ class Game(Base):
     weather_id = Column(Integer, ForeignKey("weather.id"))
     home_moneyline = Column(Integer)
     away_moneyline = Column(Integer)
+    over_under = Column(Float)
+
+    UniqueConstraint(
+        "date", "home_team_id", "away_team_id", name="unique_game_constraints"
+    )
 
     home_team = relationship(
         "Team", foreign_keys=[home_team_id], back_populates="home_games"
@@ -86,7 +158,6 @@ class TeamStat(Base):
     __tablename__ = "team_stat"
 
     id = Column(Integer, primary_key=True)
-    team_id = Column(Integer, ForeignKey("team.id"))
     score = Column(Integer)
     score_q1 = Column(Integer)
     score_q2 = Column(Integer)

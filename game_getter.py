@@ -29,13 +29,6 @@ def get_teams():
     team_names_df = pd.read_csv("historical-nfl-team-names.csv")
     return {team["Team"]: team["CurrentTeam"] for _, team in team_names_df.iterrows()}
 
-def parse_capacity(text: str):
-    numbers = re.findall(r'[\d,]+', text)
-    
-    if numbers:
-        return int(numbers[0].replace(',', ''))
-    return None
-
 
 class GameGetter:
     def __init__(self):
@@ -108,65 +101,20 @@ class GameGetter:
 
         return player_stats_obj
 
-    def get_stadium_info(self, stadium: Stadium) -> None:
-        stadium_name = (
-            "Highmark_Stadium_(New_York)"
-            if "Highmark Stadium" in stadium.name
-            else stadium.name
-        )
-        url = f"https://en.wikipedia.org/wiki/{stadium_name.replace(' ', '_')}".split(
-            ","
-        )[0]
-
-        response = self.html_session.get(url)
-        response.raise_for_status()
-        infobox = response.html.find(".infobox", first=True)
-
-        for row in infobox.find("tr"):
-            header = row.find("th", first=True)
-            if header:
-                header_text = header.text.strip()
-
-                # Check for city and state
-                if header_text in ["Location", "City"]:
-                    location = row.find("td", first=True).text.strip()
-                    location_parts = location.split(", ")
-                    if len(location_parts) >= 2:
-                        stadium.city = location_parts[0]
-                        stadium.state = location_parts[-1].split("\n")[
-                            0
-                        ]  # State is usually after the last comma
-
-                # Check for elevation
-                if header_text == "Elevation":
-                    stadium.elevation = parse_capacity(
-                        row.find("td", first=True).text.strip().split("\n")[0]
-                    )  # First line usually contains the elevation
-
-                # Check for capacity
-                if header_text == "Capacity":
-                    stadium.capacity = parse_capacity(
-                        row.find("td", first=True).text.strip().split("\n")[0]
-                    )  # First line usually contains the capacity
-
-                lat_element = infobox.find(".latitude", first=True)
-                if lat_element:
-                    stadium.latitude = lat_element.text
-
-                lon_element = infobox.find(".longitude", first=True)
-                if lon_element:
-                    stadium.longitude = lon_element.text
 
     def get_or_create_team_by_name(self, name: str) -> Team:
         with self.team_lock:
             team = next(
-                (team for team in self.all_teams if team.name in [self.teams[name], name]),
+                (
+                    team
+                    for team in self.all_teams
+                    if team.name in [self.teams[name], name]
+                ),
                 None,
             )
             if team is None:
                 team = Team(name=self.teams[name])
                 self.session.add(team)
-                # self.session.commit()
                 self.all_teams.add(team)
 
         return team
@@ -183,9 +131,8 @@ class GameGetter:
             )
             if stadium is None:
                 stadium = Stadium(name=name.split(",")[0].strip())
-                self.get_stadium_info(stadium)
+                stadium.get_info(html_session=self.html_session)
                 self.session.add(stadium)
-                # self.session.commit()
                 self.all_stadiums.add(stadium)
 
         return stadium
@@ -224,12 +171,12 @@ class GameGetter:
                 setattr(
                     away_team_stats,
                     column_name_mapping[expanded_stat_name],
-                    processed_away_value or 0
+                    processed_away_value or 0,
                 )
                 setattr(
                     home_team_stats,
                     column_name_mapping[expanded_stat_name],
-                    processed_home_value or 0
+                    processed_home_value or 0,
                 )
         else:
             processed_away_value = self.process_stat_value(away_value, stat_name)
@@ -241,7 +188,7 @@ class GameGetter:
                 home_team_stats, column_name_mapping[stat_name], processed_home_value
             )
 
-    def get_team_stats(self, res: HTMLSession) -> dict:
+    def get_team_stats(self, res: HTMLSession) -> None:
         game = Game()
         away_team_stats = TeamStat()
         home_team_stats = TeamStat()
@@ -267,13 +214,17 @@ class GameGetter:
 
         team_names = game_info[0 + playoff_add]
 
-        game.away_team = self.get_or_create_team_by_name(
-            team_names[: team_names.index(" vs ")]
-        )
-        game.away_team_stats.team_id = game.away_team.id
-        game.home_team = self.get_or_create_team_by_name(
-            team_names[(team_names.index(" vs ") + 4) :]
-        )
+        try:
+            game.away_team = self.get_or_create_team_by_name(
+                team_names.split(" vs ")[0]
+            )
+            game.away_team_stats.team_id = game.away_team.id
+            game.home_team = self.get_or_create_team_by_name(
+                team_names.split(" vs ")[1]
+            )
+        except (ValueError, KeyError):
+            print(f"Failed to get teams for {game_info[0]}")
+            return
         game.home_team_stats.team_id = game.home_team.id
 
         game.date = parse(game_info[1 + playoff_add])
@@ -341,8 +292,6 @@ class GameGetter:
         game.weather = weather
         """
 
-        return game, away_team_stats, home_team_stats
-
     def get_game(self, url: str) -> None:
         res = self.html_session.get(url)
         self.get_team_stats(res)
@@ -351,7 +300,7 @@ class GameGetter:
         for year in tqdm(
             range(start_year, self.current_season + 1), desc="Years", position=0
         ):
-            res = self.query_game_url()
+            res = self.query_game_url(year)
             game_links = []
 
             # Determine the range of weeks to process
@@ -369,7 +318,7 @@ class GameGetter:
                             str(game_link.links).replace("{'", "").replace("'}", "")
                         )
                         game_links.append(game_url)
-                        
+
             # Parallel processing of games
             with ThreadPoolExecutor() as executor:
                 future_to_url = {
@@ -393,15 +342,15 @@ class GameGetter:
                 self.session.rollback()
                 return
 
-    def query_game_url(self):
+    def query_game_url(self, year: int) -> HTMLSession:
         response = self.html_session.get(
-            f"https://www.footballdb.com/games/index.html?lg=NFL&yr={self.current_season}",
+            f"https://www.footballdb.com/games/index.html?lg=NFL&yr={year}",
         )
         response.raise_for_status()
         return response
 
     def get_last_played_week(self) -> int:
-        response = self.query_game_url()
+        response = self.query_game_url(self.current_season)
 
         for week_count, week in enumerate(response.html.find(".statistics"), start=1):
             # If any game in the week does not have a link, it's an unplayed game
